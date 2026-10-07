@@ -115,6 +115,20 @@ def seed_demo_data(registry, env_mgr, notify_mgr) -> dict:
     }
     registry.store("suites").insert(suite)
 
+    # 第二个套件：与冒烟套件重复引用 c1/c2（验证「同一用例被多个套件、
+    # 多个引用点引用」时影响分析按引用点分别呈现），默认跑 staging。
+    suite2 = {
+        "id": new_id("suite"),
+        "project_id": pid,
+        "name": "核心链路回归套件",
+        "description": "登录与健康检查的跨环境回归",
+        "group": "regression",
+        "env_id": env2["id"],
+        "case_ids": [c1, c2, c1],  # c1 刻意重复引用一次
+        "created_at": time.time(),
+    }
+    registry.store("suites").insert(suite2)
+
     registry.store("schedules").insert({
         "id": new_id("sch"),
         "project_id": pid,
@@ -124,6 +138,70 @@ def seed_demo_data(registry, env_mgr, notify_mgr) -> dict:
         "env_id": env["id"],
         "enabled": False,
         "last_fired_minute": None,
+        "created_at": time.time(),
+    })
+
+    # 第二条计划：每小时回归（继承回归套件的 staging 默认环境）
+    hourly_schedule = {
+        "id": new_id("sch"),
+        "project_id": pid,
+        "name": "每小时核心链路回归",
+        "cron": "0 * * * *",
+        "suite_id": suite2["id"],
+        "env_id": None,
+        "enabled": True,
+        "last_fired_minute": None,
+        "created_at": time.time(),
+    }
+    registry.store("schedules").insert(hourly_schedule)
+
+    # 第三条计划：回归套件但显式指定 dev 环境（环境影响分析的另一条边）
+    registry.store("schedules").insert({
+        "id": new_id("sch"),
+        "project_id": pid,
+        "name": "每日 dev 环境核心回归",
+        "cron": "30 2 * * *",
+        "suite_id": suite2["id"],
+        "env_id": env["id"],
+        "enabled": True,
+        "last_fired_minute": None,
+        "created_at": time.time(),
+    })
+
+    # 发布门禁：一个绑冒烟套件，一个绑回归计划
+    registry.store("quality_gates").insert({
+        "id": new_id("gate"),
+        "project_id": pid,
+        "name": "冒烟发布门禁",
+        "description": "通过率不低于 80%，且 P0 必过",
+        "scope": "suite",
+        "suite_id": suite["id"],
+        "schedule_id": None,
+        "conditions": {"min_pass_rate": 80.0, "max_failed": 2, "require_p0": True},
+        "enabled": True,
+        "created_at": time.time(),
+    })
+    registry.store("quality_gates").insert({
+        "id": new_id("gate"),
+        "project_id": pid,
+        "name": "回归计划门禁",
+        "description": "每小时回归不允许出现失败",
+        "scope": "schedule",
+        "suite_id": None,
+        "schedule_id": hourly_schedule["id"],
+        "conditions": {"max_failed": 0},
+        "enabled": True,
+        "created_at": time.time(),
+    })
+
+    # 测试计划：覆盖发布 2.31 的用例集（c1/c2/c3/c7）
+    registry.store("test_plans").insert({
+        "id": new_id("plan"),
+        "project_id": pid,
+        "name": "release-2.31 验收计划",
+        "description": "发布验收必须全部通过",
+        "case_ids": [c1, c2, c3, c7],
+        "status": "active",
         "created_at": time.time(),
     })
 

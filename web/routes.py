@@ -57,6 +57,18 @@ def _notify():
     return current_app.config["NOTIFY"]
 
 
+def _gates():
+    return current_app.config["GATES"]
+
+
+def _plans():
+    return current_app.config["PLANS"]
+
+
+def _impact():
+    return current_app.config["IMPACT"]
+
+
 def _payload() -> dict:
     return request.get_json(silent=True) or {}
 
@@ -224,8 +236,10 @@ def update_case(case_id: str):
     for k in ("name", "description", "priority", "tags", "timeout", "enabled", "steps"):
         if k in data:
             patch[k] = data[k]
+    # 先分析（基于改动前快照 + patch），再落库：分析与本次写入严格对应
+    impact = _impact().analyze_case(case_id, patch) if patch else None
     updated = _store("cases").update(case_id, patch)
-    return jsonify(updated)
+    return jsonify({"case": updated, "impact": impact})
 
 
 @api.delete("/cases/<case_id>")
@@ -551,7 +565,9 @@ def update_environment(env_id: str):
     patch = {k: data[k] for k in ("name", "description", "python_version",
                                   "base_image", "variables", "dependencies", "config")
              if k in data}
-    return jsonify(_env_mgr().update(env_id, patch))
+    impact = _impact().analyze_environment(env_id, patch) if patch else None
+    updated = _env_mgr().update(env_id, patch)
+    return jsonify({"environment": updated, "impact": impact})
 
 
 @api.delete("/environments/<env_id>")
@@ -686,6 +702,180 @@ def test_integration(integration_id: str):
 @api.get("/projects/<project_id>/events")
 def list_events(project_id: str):
     return jsonify({"events": _notify().events(project_id)})
+
+
+# ---------------------------------------------------------------------------
+# 发布门禁
+# ---------------------------------------------------------------------------
+
+@api.get("/projects/<project_id>/gates")
+def list_gates(project_id: str):
+    gates = _gates().list(project_id)
+    out = [dict(g, evaluation=_gates().evaluate_gate(g)) for g in gates]
+    return jsonify({"gates": out})
+
+
+@api.post("/projects/<project_id>/gates")
+def create_gate(project_id: str):
+    data = _payload()
+    if not (data.get("name") or "").strip():
+        return _err("门禁名称不能为空")
+    scope = data.get("scope", "suite")
+    if scope == "suite" and not data.get("suite_id"):
+        return _err("套件门禁必须选择套件")
+    if scope == "schedule" and not data.get("schedule_id"):
+        return _err("计划门禁必须选择定时计划")
+    return jsonify(_gates().create(project_id, data))
+
+
+@api.get("/gates/<gate_id>")
+def get_gate(gate_id: str):
+    gate = _gates().get(gate_id)
+    if gate is None:
+        return _err("门禁不存在", 404)
+    return jsonify(dict(gate, evaluation=_gates().evaluate_gate(gate)))
+
+
+@api.put("/gates/<gate_id>")
+def update_gate(gate_id: str):
+    if _gates().get(gate_id) is None:
+        return _err("门禁不存在", 404)
+    return jsonify(_gates().update(gate_id, _payload()))
+
+
+@api.delete("/gates/<gate_id>")
+def delete_gate(gate_id: str):
+    _gates().delete(gate_id)
+    return jsonify({"ok": True})
+
+
+@api.post("/gates/<gate_id>/evaluate")
+def evaluate_gate(gate_id: str):
+    result = _gates().evaluate(gate_id)
+    if "error" in result:
+        return _err(result["error"], 404)
+    return jsonify(result)
+
+
+# ---------------------------------------------------------------------------
+# 测试计划（含进度）
+# ---------------------------------------------------------------------------
+
+@api.get("/projects/<project_id>/plans")
+def list_plans(project_id: str):
+    plans = _plans().list(project_id)
+    latest = _plans().latest_case_results(project_id)
+    out = []
+    for plan in plans:
+        item = dict(plan)
+        item["progress"] = _plans().plan_progress(plan, latest=latest)
+        out.append(item)
+    return jsonify({"plans": out})
+
+
+@api.post("/projects/<project_id>/plans")
+def create_plan(project_id: str):
+    data = _payload()
+    if not (data.get("name") or "").strip():
+        return _err("测试计划名称不能为空")
+    if not data.get("case_ids"):
+        return _err("测试计划至少选择一条用例")
+    return jsonify(_plans().create(project_id, data))
+
+
+@api.get("/plans/<plan_id>")
+def get_plan(plan_id: str):
+    plan = _plans().get(plan_id)
+    if plan is None:
+        return _err("测试计划不存在", 404)
+    return jsonify(dict(plan, progress=_plans().progress(plan_id)))
+
+
+@api.put("/plans/<plan_id>")
+def update_plan(plan_id: str):
+    if _plans().get(plan_id) is None:
+        return _err("测试计划不存在", 404)
+    return jsonify(_plans().update(plan_id, _payload()))
+
+
+@api.delete("/plans/<plan_id>")
+def delete_plan(plan_id: str):
+    _plans().delete(plan_id)
+    return jsonify({"ok": True})
+
+
+# ---------------------------------------------------------------------------
+# 变更影响分析
+# ---------------------------------------------------------------------------
+
+def _persist_analysis(result: dict) -> dict:
+    """把一次分析结果存档（稳定指纹决定同改动多次分析只落一条）。"""
+    store = _store("impact_analyses")
+    fp = result.get("fingerprint")
+    existing = store.query(where=[("fingerprint", "eq", fp)], limit=1)
+    if existing:
+        record = existing[0]
+        store.update(record["id"], {"last_run_at": time.time(),
+                                    "run_count": record.get("run_count", 1) + 1})
+        result["analysis_id"] = record["id"]
+        result["cached"] = True
+        return result
+    record = {
+        "id": new_id("impact"),
+        "fingerprint": fp,
+        "project_id": result.get("project_id"),
+        "subject_kind": result["subject"].get("kind"),
+        "subject_id": result["subject"].get("id"),
+        "subject_name": result["subject"].get("name"),
+        "risk_level": result.get("risk_level"),
+        "change_types": result["change"].get("change_types"),
+        "semantic": result["change"].get("semantic"),
+        "summary": result.get("summary"),
+        "result": result,
+        "created_at": time.time(),
+        "last_run_at": time.time(),
+        "run_count": 1,
+    }
+    record["id"] = store.insert(record)
+    result["analysis_id"] = record["id"]
+    result["cached"] = False
+    return result
+
+
+@api.post("/impact/analyze/cases/<case_id>")
+def analyze_case_impact(case_id: str):
+    if _store("cases").get(case_id) is None:
+        return _err("用例不存在", 404)
+    result = _impact().analyze_case(case_id, _payload())
+    if "error" in result:
+        return _err(result["error"], 404)
+    return jsonify(_persist_analysis(result))
+
+
+@api.post("/impact/analyze/environments/<env_id>")
+def analyze_env_impact(env_id: str):
+    if _env_mgr().get(env_id) is None:
+        return _err("环境不存在", 404)
+    result = _impact().analyze_environment(env_id, _payload())
+    if "error" in result:
+        return _err(result["error"], 404)
+    return jsonify(_persist_analysis(result))
+
+
+@api.get("/projects/<project_id>/impact/history")
+def impact_history(project_id: str):
+    records = _store("impact_analyses").query(
+        where=[("project_id", "eq", project_id)],
+        order_by="last_run_at", order="desc", limit=100)
+    return jsonify({"analyses": records})
+
+
+@api.get("/impact/<analysis_id>")
+def get_impact(analysis_id: str):
+    record = _store("impact_analyses").get(analysis_id)
+    if record is None:
+        return _err("分析记录不存在", 404)
+    return jsonify(record)
 
 
 # ---------------------------------------------------------------------------

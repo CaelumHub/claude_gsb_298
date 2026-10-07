@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>发布门禁与测试计划 - 自动化测试与持续集成平台</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+  <style>
+    .item { border: 1px solid var(--border); border-radius: 9px; padding: 12px 14px; margin-bottom: 10px; }
+    .check-ok { color: var(--green); }
+    .check-bad { color: var(--red); }
+  </style>
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar" id="site-sidebar"></aside>
+
+  <main class="main">
+    <h1 class="page-title">发布门禁与测试计划</h1>
+    <p class="page-desc">门禁对套件/定时计划的最近构建按通过率、失败数、P0 必过条件给结论；
+      测试计划引用一组用例，按各自最近构建结果实时统计进度。</p>
+
+    <div class="card">
+      <div class="row">
+        <label style="margin:0 6px 0 0;align-self:center">项目</label>
+        <select id="project-select" style="max-width:240px" onchange="switchProject(this.value)"></select>
+        <span style="flex:1"></span>
+        <button class="btn" onclick="newGate()">新建门禁</button>
+        <button class="btn" onclick="newPlan()">新建测试计划</button>
+      </div>
+    </div>
+
+    <div class="grid cols-2">
+      <section class="card">
+        <h2>发布门禁</h2>
+        <div id="gate-list"><div class="empty">加载中…</div></div>
+        <div id="gate-form" style="display:none" class="mt">
+          <div><label>名称</label><input type="text" id="g-name"></div>
+          <div class="mt"><label>绑定对象</label>
+            <select id="g-scope" onchange="renderGateTargetSelect()">
+              <option value="suite">套件</option>
+              <option value="schedule">定时计划</option>
+            </select>
+          </div>
+          <div class="mt"><label>目标</label><select id="g-target"></select></div>
+          <div class="grid cols-3 mt">
+            <div><label>通过率 ≥ %</label><input type="number" id="g-rate" value="80" min="0" max="100"></div>
+            <div><label>失败数 ≤</label><input type="number" id="g-failed" value="2" min="0"></div>
+            <div><label>P0 必过</label>
+              <select id="g-p0"><option value="true">是</option><option value="false">否</option></select></div>
+          </div>
+          <div class="row mt">
+            <button class="btn" onclick="saveGate()">保存</button>
+            <button class="btn secondary" onclick="$('#gate-form').style.display='none'">取消</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>测试计划与进度</h2>
+        <div id="plan-list"><div class="empty">加载中…</div></div>
+        <div id="plan-form" style="display:none" class="mt">
+          <div><label>名称</label><input type="text" id="p-name"></div>
+          <div class="mt"><label>选择用例（按住 Ctrl 多选）</label>
+            <select id="p-cases" multiple size="8" style="width:100%"></select></div>
+          <div class="row mt">
+            <button class="btn" onclick="savePlan()">保存</button>
+            <button class="btn secondary" onclick="$('#plan-form').style.display='none'">取消</button>
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
+</div>
+
+<script src="/static/js/common.js"></script>
+<script>
+renderNav("gates");
+
+let projectId = null;
+let suites = [], schedules = [], cases = [], gates = [], plans = [];
+let editingGate = null, editingPlan = null;
+
+async function init() {
+  const params = new URLSearchParams(location.search);
+  projectId = await fillProjectSelect($("#project-select"), params.get("project_id"));
+  await switchProject(projectId);
+}
+
+async function switchProject(id) {
+  projectId = id;
+  $("#gate-form").style.display = "none";
+  $("#plan-form").style.display = "none";
+  await loadAll();
+}
+
+async function loadAll() {
+  const [sd, cd, gd, pd] = await Promise.all([
+    api(`/api/projects/${projectId}/suites`),
+    api(`/api/projects/${projectId}/cases`),
+    api(`/api/projects/${projectId}/gates`),
+    api(`/api/projects/${projectId}/plans`),
+  ]);
+  suites = sd.suites || []; cases = cd.cases || [];
+  gates = gd.gates || []; plans = pd.plans || [];
+  renderGates(); renderPlans(); renderCasePicker(); renderGateTargetSelect();
+}
+
+function renderGates() {
+  if (!gates.length) { $("#gate-list").innerHTML = '<div class="empty">暂无门禁</div>'; return; }
+  $("#gate-list").innerHTML = gates.map(g => {
+    const ev = g.evaluation || {};
+    const target = g.scope === "suite"
+      ? (suites.find(s => s.id === g.suite_id) || {}).name || g.suite_id
+      : (g.schedule_id || "");
+    const checks = (ev.checks || []).map(c =>
+      `<div class="${c.ok ? "check-ok" : "check-bad"}">${c.ok ? "✓" : "✗"} ${esc(c.message)}</div>`
+    ).join("") || `<div class="muted">${ev.status === "no_data" ? "尚无执行数据" : ev.status}</div>`;
+    return `<div class="item">
+      <div class="row spread">
+        <div><strong>${esc(g.name)}</strong>
+          <span class="tag">${g.scope === "suite" ? "套件" : "定时计划"}：${esc(target)}</span>
+          ${statusBadge(ev.status === "no_data" ? "pending" : ev.status === "disabled" ? "skipped" : ev.status)}</div>
+        <div class="row">
+          <button class="btn small secondary" onclick="editGate('${g.id}')">编辑</button>
+          <button class="btn small danger" onclick="delGate('${g.id}')">删除</button>
+        </div>
+      </div>
+      <div class="mt" style="font-size:13px">${checks}</div>
+    </div>`;
+  }).join("");
+}
+
+function renderPlans() {
+  if (!plans.length) { $("#plan-list").innerHTML = '<div class="empty">暂无测试计划</div>'; return; }
+  $("#plan-list").innerHTML = plans.map(p => {
+    const pr = p.progress || {};
+    return `<div class="item">
+      <div class="row spread">
+        <strong>${esc(p.name)}</strong>
+        <div class="row">
+          <button class="btn small secondary" onclick="editPlan('${p.id}')">编辑</button>
+          <button class="btn small danger" onclick="delPlan('${p.id}')">删除</button>
+        </div>
+      </div>
+      <div class="muted" style="font-size:12px">${(p.case_ids||[]).length} 条用例</div>
+      <div class="row mt" style="align-items:center;gap:10px">
+        <div style="flex:1">${progressBar((pr.progress_percent||0)/100)}</div>
+        <div style="font-size:13px;white-space:nowrap">
+          执行进度 ${pr.progress_percent||0}% ·
+          <span class="check-ok">通过 ${pr.passed||0}</span> ·
+          <span class="check-bad">失败 ${pr.failed||0}</span> ·
+          <span class="muted">未测 ${pr.untested||0}</span>
+        </div>
+      </div>
+    </div>`;
+  }).join("");
+}
+
+function renderCasePicker() {
+  $("#p-cases").innerHTML = cases.map(c =>
+    `<option value="${c.id}">${esc(c.name)}（${c.priority}）</option>`).join("");
+}
+
+function renderGateTargetSelect() {
+  const scope = $("#g-scope").value;
+  $("#g-target").innerHTML = scope === "suite"
+    ? suites.map(s => `<option value="${s.id}">${esc(s.name)}</option>`).join("")
+    : (schedules0()).map(s => `<option value="${s.id}">${esc(s.name)}（${esc(s.cron)}）</option>`).join("");
+}
+
+async function schedules0() {
+  const d = await api(`/api/projects/${projectId}/schedules`);
+  return d.schedules || [];
+}
+
+/* ---- 门禁表单 ---- */
+function newGate() {
+  editingGate = null;
+  $("#gate-form").style.display = "";
+  $("#g-name").value = ""; $("#g-scope").value = "suite";
+  $("#g-rate").value = "80"; $("#g-failed").value = "2"; $("#g-p0").value = "true";
+  renderGateTargetSelect();
+}
+
+async function editGate(id) {
+  await loadAll();
+  const g = gates.find(x => x.id === id);
+  if (!g) return;
+  editingGate = id;
+  $("#gate-form").style.display = "";
+  $("#g-name").value = g.name;
+  $("#g-scope").value = g.scope;
+  renderGateTargetSelect();
+  $("#g-target").value = g.scope === "suite" ? g.suite_id : g.schedule_id;
+  const c = g.conditions || {};
+  $("#g-rate").value = c.min_pass_rate ?? "";
+  $("#g-failed").value = c.max_failed ?? "";
+  $("#g-p0").value = c.require_p0 ? "true" : "false";
+}
+
+async function saveGate() {
+  const scope = $("#g-scope").value;
+  const body = {
+    name: $("#g-name").value.trim(), scope,
+    conditions: {
+      min_pass_rate: $("#g-rate").value === "" ? null : Number($("#g-rate").value),
+      max_failed: $("#g-failed").value === "" ? null : Number($("#g-failed").value),
+      require_p0: $("#g-p0").value === "true",
+    },
+  };
+  if (!body.name) return toast("请填写门禁名称", "error");
+  const target = $("#g-target").value;
+  if (scope === "suite") body.suite_id = target; else body.schedule_id = target;
+  try {
+    if (editingGate) await api(`/api/gates/${editingGate}`, { method: "PUT", body });
+    else await api(`/api/projects/${projectId}/gates`, { method: "POST", body });
+    toast("已保存"); $("#gate-form").style.display = "none"; loadAll();
+  } catch (e) { toast(e.message, "error"); }
+}
+
+async function delGate(id) {
+  if (!confirm("确认删除该门禁？")) return;
+  await api(`/api/gates/${id}`, { method: "DELETE" });
+  toast("已删除"); loadAll();
+}
+
+/* ---- 计划表单 ---- */
+function newPlan() {
+  editingPlan = null;
+  $("#plan-form").style.display = "";
+  $("#p-name").value = "";
+  $$("#p-cases option").forEach(o => o.selected = false);
+}
+
+async function editPlan(id) {
+  await loadAll();
+  const p = plans.find(x => x.id === id);
+  if (!p) return;
+  editingPlan = id;
+  $("#plan-form").style.display = "";
+  $("#p-name").value = p.name;
+  const ids = new Set(p.case_ids || []);
+  $$("#p-cases option").forEach(o => o.selected = ids.has(o.value));
+}
+
+async function savePlan() {
+  const body = { name: $("#p-name").value.trim(),
+    case_ids: $$("#p-cases option:checked").map(o => o.value) };
+  if (!body.name) return toast("请填写计划名称", "error");
+  if (!body.case_ids.length) return toast("至少选择一条用例", "error");
+  try {
+    if (editingPlan) await api(`/api/plans/${editingPlan}`, { method: "PUT", body });
+    else await api(`/api/projects/${projectId}/plans`, { method: "POST", body });
+    toast("已保存"); $("#plan-form").style.display = "none"; loadAll();
+  } catch (e) { toast(e.message, "error"); }
+}
+
+async function delPlan(id) {
+  if (!confirm("确认删除该测试计划？")) return;
+  await api(`/api/plans/${id}`, { method: "DELETE" });
+  toast("已删除"); loadAll();
+}
+
+init();
+</script>
+</body>
+</html>

@@ -10,6 +10,9 @@
 - :mod:`engine.report`      测试报告生成（通过率 / 耗时 / 分组 / 趋势）
 - :mod:`engine.defects`     缺陷跟踪
 - :mod:`engine.notify`      通知与集成
+- :mod:`engine.gates`       发布门禁与判定
+- :mod:`engine.plans`       测试计划与进度
+- :mod:`engine.impact`      变更影响分析（用例/环境改动沿引用链传播）
 - :mod:`engine.scheduler`   并发调度（构建池 + 用例池 + 定时触发循环）
 """
 
@@ -27,6 +30,9 @@ from .coverage import CoverageAnalyzer
 from .report import ReportGenerator
 from .defects import DefectManager
 from .notify import NotificationManager
+from .gates import QualityGateManager
+from .plans import TestPlanManager
+from .impact import ImpactAnalyzer, diff_case, diff_environment
 from .scheduler import Scheduler
 
 __all__ = [
@@ -45,5 +51,10 @@ __all__ = [
     "ReportGenerator",
     "DefectManager",
     "NotificationManager",
+    "QualityGateManager",
+    "TestPlanManager",
+    "ImpactAnalyzer",
+    "diff_case",
+    "diff_environment",
     "Scheduler",
 ]

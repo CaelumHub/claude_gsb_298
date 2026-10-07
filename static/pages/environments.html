@@ -30,6 +30,8 @@
       </div>
     </div>
 
+    <div id="impact-banner-host"></div>
+
     <div class="grid cols-2">
       <section class="card">
         <h2>环境列表</h2>
@@ -88,6 +90,26 @@ async function init() {
 }
 
 async function switchProject(id) { projectId = id; editingId = null; $("#edit-card").style.display=""; $("#resolve-card").style.display="none"; await loadEnvs(); }
+
+/* 保存后展示本次环境改动的影响分析 */
+function showImpactBanner(impact) {
+  const host = $("#impact-banner-host");
+  const s = impact.summary || {};
+  const riskColor = { high: "var(--red)", medium: "var(--amber)", low: "var(--blue)" }[impact.risk_level] || "var(--text-muted)";
+  const riskText = { high: "高风险", medium: "中风险", low: "低风险", none: "无风险" }[impact.risk_level];
+  host.innerHTML = `<div class="card" style="border-left:3px solid ${riskColor}">
+    <div class="row spread">
+      <strong style="color:${riskColor}">变更影响：${riskText}</strong>
+      <a class="btn small secondary" href="/page/impact.html?project_id=${projectId}">查看完整影响分析 →</a>
+    </div>
+    <div class="muted mt" style="font-size:13px">
+      受影响套件 ${s.suites} · 定时计划 ${s.schedules} · 门禁 ${s.quality_gates} ·
+      报告可比性断点 ${s.report_breaks}
+    </div>
+    ${(impact.change && impact.change.risks || []).slice(0, 2).map(t =>
+      `<div style="font-size:13px;margin-top:4px">• ${esc(t)}</div>`).join("")}
+  </div>`;
+}
 
 async function loadEnvs() {
   if (!projectId) return;
@@ -186,8 +208,9 @@ $("#btn-save").onclick = async () => {
       fail_rate: parseFloat($("#e-fail").value||"0") },
   };
   if (editingId) {
-    await api(`/api/environments/${editingId}`, { method: "PUT", body });
+    const resp = await api(`/api/environments/${editingId}`, { method: "PUT", body });
     toast("已保存");
+    if (resp.impact) showImpactBanner(resp.impact);
   } else {
     await api(`/api/projects/${projectId}/environments`, { method: "POST", body });
     toast("已创建");

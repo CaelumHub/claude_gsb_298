@@ -40,6 +40,8 @@
       </div>
     </div>
 
+    <div id="impact-banner-host"></div>
+
     <div class="grid cols-2">
       <!-- 用例列表 -->
       <section class="card">
@@ -125,6 +127,26 @@ async function loadTags() {
   sel.innerHTML = '<option value="">全部标签</option>' +
     (d.groups || []).map(g => `<option value="${esc(g.name)}">${esc(g.name)} (${g.count})</option>`).join("");
   sel.value = cur;
+}
+
+/* 保存后展示本次改动的影响分析（可跳到分析页看完整传播路径） */
+function showImpactBanner(impact) {
+  const host = $("#impact-banner-host");
+  const s = impact.summary || {};
+  const riskColor = { high: "var(--red)", medium: "var(--amber)", low: "var(--blue)" }[impact.risk_level] || "var(--text-muted)";
+  const riskText = { high: "高风险", medium: "中风险", low: "低风险", none: "无风险" }[impact.risk_level];
+  host.innerHTML = `<div class="card" style="border-left:3px solid ${riskColor}">
+    <div class="row spread">
+      <strong style="color:${riskColor}">变更影响：${riskText}</strong>
+      <a class="btn small secondary" href="/page/impact.html?project_id=${projectId}">查看完整影响分析 →</a>
+    </div>
+    <div class="muted mt" style="font-size:13px">
+      套件引用点 ${s.suites} · 定时计划 ${s.schedules} · 门禁 ${s.quality_gates} ·
+      测试计划 ${s.test_plans} · 报告可比性断点 ${s.report_breaks} · 传播路径 ${s.trace_count}
+    </div>
+    ${(impact.change && impact.change.risks || []).slice(0, 2).map(t =>
+      `<div style="font-size:13px;margin-top:4px">• ${esc(t)}</div>`).join("")}
+  </div>`;
 }
 
 async function loadCases() {
@@ -295,8 +317,9 @@ $("#btn-save").onclick = async () => {
   if (!body.name) return toast("请输入用例名称", "error");
   if (!projectId) return toast("请先选择项目", "error");
   if (currentId) {
-    await api(`/api/cases/${currentId}`, { method: "PUT", body });
+    const resp = await api(`/api/cases/${currentId}`, { method: "PUT", body });
     toast("已保存");
+    if (resp.impact) showImpactBanner(resp.impact);
   } else {
     await api(`/api/projects/${projectId}/cases`, { method: "POST", body });
     toast("已创建");

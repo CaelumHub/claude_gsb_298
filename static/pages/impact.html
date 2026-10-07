@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>变更影响分析 - 自动化测试与持续集成平台</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+  <style>
+    .risk-high   { color: var(--red); font-weight: 700; }
+    .risk-medium { color: var(--amber); font-weight: 700; }
+    .risk-low    { color: var(--blue); font-weight: 700; }
+    .risk-none   { color: var(--text-muted); }
+    .trace { border: 1px solid var(--border); border-radius: 9px; padding: 10px 14px;
+      margin-bottom: 8px; background: var(--surface); }
+    .trace .chain { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 13px; }
+    .trace .node { background: var(--surface-2); border: 1px solid var(--border);
+      border-radius: 7px; padding: 3px 9px; }
+    .trace .node.kind-quality_gate { border-color: var(--violet); color: var(--violet); }
+    .trace .node.kind-test_plan, .trace .node.kind-plan_progress { border-color: var(--blue); color: var(--blue); }
+    .trace .node.kind-report { border-color: var(--amber); color: var(--amber); }
+    .trace .arrow { color: var(--text-muted); }
+    .trace .ref-note { font-size: 12px; color: var(--text-muted); margin-left: 2px; }
+    .trace .impact-text { margin-top: 7px; font-size: 13px; color: var(--text); }
+    .trace.incomparable { border-left: 3px solid var(--amber); }
+    .risk-box { border-radius: 9px; padding: 12px 16px; margin-bottom: 14px; font-size: 14px; }
+    .risk-box.high   { background: #fef2f2; border: 1px solid #fecaca; }
+    .risk-box.medium { background: #fffbeb; border: 1px solid #fde68a; }
+    .risk-box.low    { background: #eff6ff; border: 1px solid #bfdbfe; }
+    .risk-box.none   { background: var(--surface-2); border: 1px solid var(--border); }
+    .stat-pill { display:inline-block; background: var(--surface-2); border:1px solid var(--border);
+      border-radius: 999px; padding: 2px 12px; margin: 2px 6px 2px 0; font-size: 13px; }
+    .risk-tip { font-size: 13px; margin: 3px 0; }
+    details.diffs summary { cursor: pointer; font-size: 13px; color: var(--primary); }
+    .diff-tbl { width:100%; border-collapse: collapse; margin-top: 8px; font-size: 12px; }
+    .diff-tbl th, .diff-tbl td { border: 1px solid var(--border); padding: 5px 8px;
+      vertical-align: top; word-break: break-all; }
+    .diff-tbl th { background: var(--surface-2); text-align: left; }
+    pre.diff-val { margin:0; white-space: pre-wrap; font-family: var(--mono); font-size: 11px;
+      max-height: 120px; overflow: auto; }
+  </style>
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar" id="site-sidebar"></aside>
+
+  <main class="main">
+    <h1 class="page-title">变更影响分析</h1>
+    <p class="page-desc">修改用例（步骤/断言/超时/禁用）或环境（变量/依赖/运行参数）时，
+      沿 用例 → 套件 → 定时计划 → 发布门禁/测试计划/历史报告 的引用链逐层分析影响范围与风险。</p>
+
+    <div class="card">
+      <div class="row">
+        <label style="margin:0 6px 0 0;align-self:center">项目</label>
+        <select id="project-select" style="max-width:220px" onchange="switchProject(this.value)"></select>
+        <span style="flex:1"></span>
+        <button class="btn secondary" onclick="loadHistory()">查看分析历史</button>
+      </div>
+      <div class="grid cols-2 mt">
+        <div>
+          <label>用例改动分析</label>
+          <div class="row mt">
+            <select id="case-select" style="flex:1"></select>
+            <select id="case-change-type" onchange="fillCaseTemplate()">
+              <option value="assertion">改一条断言</option>
+              <option value="steps">改步骤</option>
+              <option value="timeout">改超时</option>
+              <option value="disable">禁用该用例</option>
+              <option value="enable">启用该用例</option>
+              <option value="rename">仅改名（低风险对照）</option>
+            </select>
+            <button class="btn" onclick="analyzeCase()">分析</button>
+          </div>
+        </div>
+        <div>
+          <label>环境改动分析</label>
+          <div class="row mt">
+            <select id="env-select" style="flex:1"></select>
+            <select id="env-change-type" onchange="fillEnvTemplate()">
+              <option value="variable">改变量</option>
+              <option value="config">改运行参数（失败率等）</option>
+              <option value="dependencies">改依赖</option>
+              <option value="rename">仅改名（低风险对照）</option>
+            </select>
+            <button class="btn" onclick="analyzeEnv()">分析</button>
+          </div>
+        </div>
+      </div>
+      <div class="mt muted" style="font-size:12px">提示：实际保存用例/环境编辑时系统也会自动分析；同一改动重复分析结果稳定（带内容指纹）。</div>
+    </div>
+
+    <section id="result-host" class="mt"></section>
+
+    <section class="card mt" id="history-card" style="display:none">
+      <h2>分析历史（同一改动指纹去重）</h2>
+      <div id="history-list"></div>
+    </section>
+  </main>
+</div>
+
+<script src="/static/js/common.js"></script>
+<script>
+renderNav("impact");
+
+let projectId = null;
+let cases = [];
+let envs = [];
+let currentResult = null;
+
+async function init() {
+  const params = new URLSearchParams(location.search);
+  projectId = await fillProjectSelect($("#project-select"), params.get("project_id"));
+  await switchProject(projectId);
+}
+
+async function switchProject(id) {
+  projectId = id;
+  $("#result-host").innerHTML = "";
+  await Promise.all([loadCases(), loadEnvs()]);
+  loadHistory();
+}
+
+async function loadCases() {
+  const d = await api(`/api/projects/${projectId}/cases`);
+  cases = d.cases || [];
+  $("#case-select").innerHTML = cases.map(c =>
+    `<option value="${c.id}">${esc(c.name)}（${c.priority}）</option>`).join("");
+  fillCaseTemplate();
+}
+
+async function loadEnvs() {
+  const d = await api(`/api/projects/${projectId}/environments`);
+  envs = d.environments || [];
+  $("#env-select").innerHTML = envs.map(e =>
+    `<option value="${e.id}">${esc(e.name)}</option>`).join("");
+  fillEnvTemplate();
+}
+
+/* ---------- 构造「拟议改动」补丁 ---------- */
+function selectedCase() { return cases.find(c => c.id === $("#case-select").value); }
+function selectedEnv() { return envs.find(e => e.id === $("#env-select").value); }
+
+function fillCaseTemplate() { /* 补丁在分析时实时生成，此处保留钩子 */ }
+function fillEnvTemplate() { }
+
+function buildCasePatch() {
+  const c = selectedCase();
+  const type = $("#case-change-type").value;
+  if (type === "disable") return { enabled: false };
+  if (type === "enable") return { enabled: true };
+  if (type === "rename") return { name: (c.name || "") + "（改名）" };
+  if (type === "timeout") return { timeout: (c.timeout || 60) + 30 };
+  if (type === "assertion") {
+    const steps = (c.steps || []).map(s => ({ ...s }));
+    const idx = steps.map(s => s.action).lastIndexOf("assert");
+    if (idx >= 0) steps[idx].expected = tweakExpected(steps[idx].expected);
+    else steps.push({ action: "assert", type: "equals", actual: "${x}", expected: 1 });
+    return { steps };
+  }
+  if (type === "steps") {
+    const steps = (c.steps || []).map(s => ({ ...s }));
+    steps.push({ action: "set", key: "impact_probe", value: 1, name: "影响分析探针步骤" });
+    return { steps };
+  }
+  return {};
+}
+
+function tweakExpected(v) {
+  if (typeof v === "number") return v + 1;
+  if (typeof v === "boolean") return !v;
+  if (Array.isArray(v)) return v;
+  return String(v) + "_changed";
+}
+
+function buildEnvPatch() {
+  const e = selectedEnv();
+  const type = $("#env-change-type").value;
+  if (type === "rename") return { name: (e.name || "") + "（改名）" };
+  if (type === "variable") {
+    const variables = { ...(e.variables || {}) };
+    variables.BASE_URL = (variables.BASE_URL || "http://mock.local") + "/v2";
+    variables.IMPACT_PROBE = "1";
+    return { variables };
+  }
+  if (type === "config") {
+    const config = { ...(e.config || {}) };
+    config.fail_rate = Math.min(1, (config.fail_rate || 0) + 0.3);
+    return { config };
+  }
+  if (type === "dependencies") {
+    const dependencies = (e.dependencies || []).map(d => ({ ...d }));
+    dependencies.push({ name: "httpx", constraint: ">=0.27" });
+    return { dependencies };
+  }
+  return {};
+}
+
+async function analyzeCase() {
+  const c = selectedCase();
+  if (!c) return toast("请选择用例", "error");
+  try {
+    const r = await api(`/api/impact/analyze/cases/${c.id}`,
+      { method: "POST", body: buildCasePatch() });
+    renderResult(r);
+  } catch (e) { toast(e.message, "error"); }
+}
+
+async function analyzeEnv() {
+  const e = selectedEnv();
+  if (!e) return toast("请选择环境", "error");
+  try {
+    const r = await api(`/api/impact/analyze/environments/${e.id}`,
+      { method: "POST", body: buildEnvPatch() });
+    renderResult(r);
+  } catch (err) { toast(err.message, "error"); }
+}
+
+/* ---------- 结果渲染 ---------- */
+const RISK_TEXT = { high: "高风险", medium: "中风险", low: "低风险", none: "无风险" };
+const KIND_TEXT = {
+  case: "用例", suite: "套件", schedule: "定时计划", quality_gate: "发布门禁",
+  test_plan: "测试计划", plan_progress: "计划进度", report: "历史报告/覆盖率",
+  environment: "环境", none: "无下游",
+};
+
+function renderResult(r) {
+  currentResult = r;
+  const ch = r.change;
+  const s = r.summary;
+  const risks = (ch.risks || []).map(x => `<div class="risk-tip">• ${esc(x)}</div>`).join("") ||
+                `<div class="risk-tip">• 该改动不改变执行语义，无执行面风险。</div>`;
+
+  const pills = [
+    ["套件引用点", s.suites], ["定时计划", s.schedules], ["发布门禁", s.quality_gates],
+    ["测试计划", s.test_plans], ["报告可比性断点", s.report_breaks], ["传播路径", s.trace_count],
+  ].map(([k, v]) => `<span class="stat-pill">${k} <strong>${v}</strong></span>`).join("");
+
+  const diffRows = Object.entries(ch.details || {}).map(([field, d]) => `
+    <tr><th>${esc(field)}</th>
+      <td><pre class="diff-val">${esc(JSON.stringify(d.before, null, 1))}</pre></td>
+      <td><pre class="diff-val">${esc(JSON.stringify(d.after, null, 1))}</pre></td>
+    </tr>`).join("");
+
+  const tracesHtml = r.traces.map(renderTrace).join("");
+
+  $("#result-host").innerHTML = `
+    <div class="risk-box ${r.risk_level}">
+      <div class="row spread">
+        <div><strong>${RISK_TEXT[r.risk_level]}</strong> ·
+          ${KIND_TEXT[r.subject.kind]}「${esc(r.subject.name)}」${ch.semantic ? "的执行语义发生变化" : "仅元数据变化"}
+          <span class="muted" style="font-size:12px">（改动类型：${(ch.change_types||[]).map(esc).join("、") || "无"}）</span>
+        </div>
+        <div class="muted mono" style="font-size:12px">指纹 ${esc(r.fingerprint)}</div>
+      </div>
+      <div class="mt">${pills}</div>
+      <div class="mt">${risks}</div>
+      ${diffRows ? `<details class="diffs mt"><summary>查看字段级差异</summary>
+        <table class="diff-tbl"><tr><th>字段</th><th>改动前</th><th>改动后</th></tr>${diffRows}</table>
+      </details>` : ""}
+    </div>
+    <h2>影响传播路径（每个引用点一条，间接影响逐跳呈现）</h2>
+    ${tracesHtml || '<div class="empty">无传播路径</div>'}`;
+}
+
+function renderTrace(trace) {
+  const incomparable = trace.some(n => n.kind === "report" && n.comparable === false);
+  const chain = trace.map((n, i) => {
+    const parts = [];
+    if (i > 0) parts.push(`<span class="arrow">→</span>`);
+    const ref = n.reference_note ? `<span class="ref-note">${esc(n.reference_note)}</span>` : "";
+    const status = n.kind === "quality_gate" && n.gate_status
+      ? ` <span class="badge ${n.gate_status === "passed" ? "passed" : n.gate_status === "failed" ? "failed" : "pending"}">${esc(n.gate_status)}</span>` : "";
+    const disabled = n.enabled === false ? ' <span class="badge pending">已停用</span>' : "";
+    parts.push(`<span class="node kind-${n.kind}">${KIND_TEXT[n.kind] || n.kind}：${esc(n.name || "—")}${status}${disabled}</span>${ref}`);
+    return parts.join("");
+  }).join("");
+  const impacts = trace.filter(n => n.impact).map(n =>
+    `<div class="impact-text">▸ ${esc(n.impact)}</div>`).join("");
+  return `<div class="trace ${incomparable ? "incomparable" : ""}"><div class="chain">${chain}</div>${impacts}</div>`;
+}
+
+/* ---------- 历史 ---------- */
+async function loadHistory() {
+  if (!projectId) return;
+  try {
+    const d = await api(`/api/projects/${projectId}/impact/history`);
+    const list = d.analyses || [];
+    const card = $("#history-card");
+    if (!list.length) { card.style.display = "none"; return; }
+    card.style.display = "";
+    $("#history-list").innerHTML = list.map(a => `
+      <div class="trace">
+        <div class="row spread">
+          <div><span class="risk-${a.risk_level}">${RISK_TEXT[a.risk_level] || "—"}</span>
+            · ${KIND_TEXT[a.subject_kind] || a.subject_kind}：${esc(a.subject_name || a.subject_id)}
+            <span class="muted" style="font-size:12px">(${(a.change_types || []).join("、") || "无改动类型"})</span>
+          </div>
+          <div class="muted" style="font-size:12px">
+            ${fmtTime(a.last_run_at)} · 分析 ${a.run_count} 次 ·
+            <span class="mono">${esc(a.fingerprint)}</span></div>
+        </div>
+        <div class="mt" style="font-size:12px;color:var(--text-muted)">
+          套件引用点 ${a.summary.suites} · 定时计划 ${a.summary.schedules} ·
+          门禁 ${a.summary.quality_gates} · 测试计划 ${a.summary.test_plans} ·
+          报告断点 ${a.summary.report_breaks}
+        </div>
+      </div>`).join("");
+  } catch (_) { /* 忽略历史加载失败 */ }
+}
+
+init();
+</script>
+</body>
+</html>
