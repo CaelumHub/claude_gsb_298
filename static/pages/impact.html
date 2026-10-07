@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>变更影响分析 - 自动化测试与持续集成平台</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+  <style>
+    .risk-high { color: var(--red); font-weight: 700; }
+    .risk-medium { color: var(--amber); font-weight: 700; }
+    .risk-low { color: var(--blue); font-weight: 600; }
+    .path-box { font-family: var(--mono); font-size: 12px; background: var(--surface-2); border-radius: 8px;
+      padding: 8px 10px; margin-bottom: 6px; overflow-wrap: anywhere; }
+    textarea { min-height: 150px; }
+  </style>
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar" id="site-sidebar"></aside>
+
+  <main class="main">
+    <h1 class="page-title">变更影响分析</h1>
+    <p class="page-desc">分析用例步骤、断言、超时、禁用，或环境变量、依赖、运行参数变更对套件、定时计划、门禁、计划进度和历史报告的影响。</p>
+
+    <section class="card">
+      <div class="grid cols-4">
+        <div>
+          <label>项目</label>
+          <select id="project-select" onchange="switchProject(this.value)"></select>
+        </div>
+        <div>
+          <label>变更对象</label>
+          <select id="type-select" onchange="loadTargets()">
+            <option value="case">测试用例</option>
+            <option value="environment">测试环境</option>
+          </select>
+        </div>
+        <div>
+          <label>对象</label>
+          <select id="target-select"></select>
+        </div>
+        <div style="align-self:end">
+          <button class="btn" id="btn-analyze">开始分析</button>
+        </div>
+      </div>
+      <div class="mt">
+        <label>待应用变更（JSON Patch；可只填变化字段）</label>
+        <textarea id="patch" class="mono">{"timeout": 90}</textarea>
+        <div class="muted" style="font-size:12px;margin-top:4px">
+          用例字段：steps / timeout / enabled / priority / tags 等；环境字段：variables / dependencies / config / python_version 等。
+        </div>
+      </div>
+    </section>
+
+    <div id="result"></div>
+  </main>
+</div>
+
+<script src="/static/js/common.js"></script>
+<script>
+renderNav("impact");
+
+let projectId = null;
+let targets = [];
+
+async function init() {
+  const params = new URLSearchParams(location.search);
+  const type = params.get("type") === "environment" ? "environment" : "case";
+  $("#type-select").value = type;
+  projectId = await fillProjectSelect($("#project-select"), params.get("project_id"));
+  await loadTargets();
+  const targetId = params.get("target_id");
+  if (targetId) $("#target-select").value = targetId;
+  const storedPatch = sessionStorage.getItem("impactPatch");
+  if (storedPatch) {
+    $("#patch").value = storedPatch;
+    sessionStorage.removeItem("impactPatch");
+  } else if (params.get("patch")) {
+    $("#patch").value = params.get("patch");
+  }
+  if (targetId) analyze();
+}
+
+async function switchProject(id) { projectId = id; await loadTargets(); }
+
+async function loadTargets() {
+  if (!projectId) return;
+  const type = $("#type-select").value;
+  const d = type === "case"
+    ? await api(`/api/projects/${projectId}/cases`)
+    : await api(`/api/projects/${projectId}/environments`);
+  targets = d.cases || d.environments || [];
+  $("#target-select").innerHTML = targets.map(x =>
+    `<option value="${x.id}">${esc(x.name)}</option>`).join("");
+}
+
+function riskBadge(level) {
+  const label = { high: "高风险", medium: "中风险", low: "低风险", none: "无行为风险" }[level] || level;
+  return `<span class="badge ${level === 'high' ? 'failed' : level === 'medium' ? 'timeout' : 'blue'}">${label}</span>`;
+}
+
+function renderChanges(changes) {
+  if (!changes || !changes.length) return '<div class="empty">没有检测到字段变化。</div>';
+  return `<table><thead><tr><th>风险</th><th>字段</th><th>说明</th></tr></thead><tbody>${
+    changes.map(c => `<tr><td>${riskBadge(c.risk)}</td><td class="mono">${esc(c.field)}</td><td>${esc(c.message)}</td></tr>`).join("")
+  }</tbody></table>`;
+}
+
+function renderSuiteRefs(refs) {
+  if (!refs.length) return '<div class="empty">没有套件引用点。</div>';
+  return `<table><thead><tr><th>引用点 ID</th><th>套件</th><th>绑定 / 位置</th></tr></thead><tbody>${
+    refs.map(r => `<tr>
+      <td class="mono">${esc(r.id)}</td>
+      <td>${esc(r.suite_name)}</td>
+      <td>${r.position != null ? `第 ${r.position + 1} 个引用` : esc(r.binding || "环境绑定")}</td>
+    </tr>`).join("")
+  }</tbody></table>`;
+}
+
+function renderSchedules(items) {
+  if (!items.length) return '<div class="empty">没有定时计划引用。</div>';
+  return `<table><thead><tr><th>计划</th><th>状态</th><th>Cron</th><th>引用点</th><th>风险提示</th></tr></thead><tbody>${
+    items.map(x => `<tr>
+      <td><strong>${esc(x.name)}</strong><div class="muted mono">${esc(x.id)}</div></td>
+      <td>${x.enabled ? '<span class="badge ok">启用</span>' : '<span class="badge skipped">禁用</span>'}</td>
+      <td class="mono">${esc(x.cron || "")}</td>
+      <td>${(x.suite_references || x.environment_references || []).map(esc).join("<br>")}</td>
+      <td>${esc(x.risk_message)}</td>
+    </tr>`).join("")
+  }</tbody></table>`;
+}
+
+function renderGates(items) {
+  if (!items.length) return '<div class="empty">没有发布门禁引用。</div>';
+  return `<table><thead><tr><th>门禁</th><th>当前结论</th><th>规则</th><th>风险</th></tr></thead><tbody>${
+    items.map(x => `<tr>
+      <td><strong>${esc(x.name)}</strong><div class="muted mono">${esc(x.id)}</div></td>
+      <td>${esc((x.current_conclusion || {}).constructor === String ? x.current_conclusion : x.current_evidence?.conclusion || "无证据")}</td>
+      <td><pre class="mono" style="margin:0;font-size:12px;white-space:pre-wrap">${esc(JSON.stringify(x.rules || {}, null, 2))}</pre></td>
+      <td>${riskBadge(x.risk)}<div class="muted" style="font-size:12px">${esc(x.risk_message)}</div></td>
+    </tr>`).join("")
+  }</tbody></table>`;
+}
+
+function renderPlans(items) {
+  if (!items.length) return '<div class="empty">没有测试计划引用。</div>';
+  return `<table><thead><tr><th>计划</th><th>当前进度</th><th>风险提示</th></tr></thead><tbody>${
+    items.map(x => {
+      const p = x.current_progress || {};
+      return `<tr>
+        <td><strong>${esc(x.name)}</strong><div class="muted mono">${esc(x.id)}</div></td>
+        <td>${p.completed ?? 0}/${p.total ?? 0} 完成，通过率 ${p.pass_rate ?? 0}%<br>
+          <div class="muted mono" style="font-size:12px">依据：${esc(p.build_ids || []).join(", ")}</div></td>
+        <td>${esc(x.risk_message)}</td>
+      </tr>`;
+    }).join("")
+  }</tbody></table>`;
+}
+
+function renderReports(items) {
+  if (!items.length) return '<div class="empty">没有需要标注口径的历史构建。</div>';
+  return `<table><thead><tr><th>历史构建</th><th>状态</th><th>环境</th><th>通过率 / 覆盖率</th><th>可比性提示</th></tr></thead><tbody>${
+    items.map(x => `<tr>
+      <td>${esc(x.name)}<div class="muted mono">${esc(x.build_id)}</div></td>
+      <td>${statusBadge(x.status)}</td>
+      <td class="mono">${esc(x.env_id || "")}</td>
+      <td>${x.summary.pass_rate}% / ${x.summary.coverage_percent ?? "—"}%</td>
+      <td>${(x.reasons || []).map(esc).join("<br>")}</td>
+    </tr>`).join("")
+  }</tbody></table>`;
+}
+
+function renderAnalysis(d) {
+  const count = d.impacted || {};
+  return `
+    <section class="card">
+      <div class="row spread">
+        <h2 style="margin:0">总体结论 ${riskBadge(d.risk_level)}</h2>
+        <div class="muted">${d.behavior_changed ? "包含执行行为变化" : "仅元数据变化"}</div>
+      </div>
+      <div class="grid cols-5 mt">
+        ${[
+          ["套件", count.suite_count], ["引用点", count.suite_reference_count],
+          ["定时计划", count.schedule_count], ["发布门禁", count.release_gate_count],
+          ["测试计划", count.test_plan_count],
+        ].map(([k, v]) => `<div class="stat"><div class="v">${v}</div><div class="k">${k}</div></div>`).join("")}
+      </div>
+      <div class="mt">${(d.risk_tips || []).map(t => `<div class="mt">${riskBadge(t.level)} <span>${esc(t.message)}</span></div>`).join("")}</div>
+    </section>
+
+    <section class="card"><h2>检测到的变更</h2>${renderChanges(d.changes)}</section>
+    <section class="card"><h2>套件引用点（每个重复引用分别呈现）</h2>${renderSuiteRefs(d.suite_references)}</section>
+
+    <div class="grid cols-2">
+      <section class="card"><h2>受影响定时计划</h2>${renderSchedules(d.schedules)}</section>
+      <section class="card"><h2>发布门禁结论</h2>${renderGates(d.release_gates)}</section>
+    </div>
+    <section class="card"><h2>测试计划进度</h2>${renderPlans(d.test_plans)}</section>
+    <section class="card"><h2>历史报告与覆盖率可比性</h2>${renderReports(d.historical_reports)}</section>
+    <section class="card">
+      <h2>覆盖率统计口径</h2>
+      <div class="muted" style="font-size:13px;margin-bottom:10px">变更前覆盖率只可作为旧基线；下一次受影响计划或门禁执行后，趋势应在变更点分段。</div>
+      ${(() => {
+        const c = d.coverage_statistics || {};
+        if (!c.historical_builds || !c.historical_builds.length) {
+          return '<div class="empty">当前没有含覆盖率快照的历史构建；未来执行口径已纳入风险范围。</div>';
+        }
+        return `<table><thead><tr><th>构建</th><th>套件</th><th>环境</th><th>覆盖率</th><th>通过率</th></tr></thead><tbody>${
+          c.historical_builds.map(x => `<tr><td class="mono">${esc(x.build_id)}</td><td class="mono">${esc(x.suite_id || "")}</td>
+            <td class="mono">${esc(x.env_id || "")}</td><td>${x.coverage_percent ?? "—"}%</td><td>${x.pass_rate ?? "—"}%</td></tr>`).join("")
+        }</tbody></table>`;
+      })()}
+    </section>
+
+    <section class="card">
+      <h2>引用传递路径</h2>
+      <div class="muted" style="font-size:13px;margin-bottom:10px">间接影响沿用例/环境 → 套件引用点 → 计划/门禁/计划进度完整展开。</div>
+      ${(d.paths || []).map(p => `<div class="path-box">${p.nodes.map(esc).join("  →  ")}</div>`).join("") || '<div class="empty">无路径</div>'}
+    </section>`;
+}
+
+$("#btn-analyze").onclick = analyze;
+
+async function analyze() {
+  let patch = {};
+  try { patch = JSON.parse($("#patch").value || "{}"); } catch (_) { return toast("JSON Patch 不是合法 JSON", "error"); }
+  const type = $("#type-select").value;
+  const id = $("#target-select").value;
+  if (!id) return toast("请选择分析对象", "error");
+  const btn = $("#btn-analyze");
+  setLoading(btn, true, "分析中…");
+  try {
+    const d = await api(`/api/${type === "case" ? "cases" : "environments"}/${id}/impact`, {
+      method: "POST",
+      body: { patch },
+    });
+    $("#result").innerHTML = renderAnalysis(d);
+  } catch (e) {
+    toast(e.message, "error");
+  }
+  setLoading(btn, false);
+}
+
+init();
+</script>
+</body>
+</html>

@@ -28,6 +28,7 @@ from .report import ReportGenerator
 from .defects import DefectManager
 from .notify import NotificationManager
 from .scheduler import Scheduler
+from .impact import ImpactAnalyzer, detect_case_changes, detect_environment_changes
 
 __all__ = [
     "PRIORITIES",
@@ -46,4 +47,7 @@ __all__ = [
     "DefectManager",
     "NotificationManager",
     "Scheduler",
+    "ImpactAnalyzer",
+    "detect_case_changes",
+    "detect_environment_changes",
 ]

@@ -333,6 +333,15 @@ class StoreRegistry:
                 self._stores[name] = ShardedStore(self.root, name, self.shard_size)
             return self._stores[name]
 
+    def optional_store(self, name: str) -> Optional[ShardedStore]:
+        """只获取已存在的实体存储；目录不存在时不创建新分片。"""
+        with self._lock:
+            if name in self._stores:
+                return self._stores[name]
+            if not os.path.isdir(os.path.join(self.root, name)):
+                return None
+            return self.store(name)
+
     def names(self) -> list[str]:
         if not os.path.isdir(self.root):
             return []

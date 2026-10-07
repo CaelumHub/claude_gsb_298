@@ -90,7 +90,11 @@ class Scheduler:
             return {"error": "环境不存在"}
 
         case_ids = suite.get("case_ids") or []
-        cases = cases_store.get_many(case_ids)
+        # 保留套件中的重复引用与顺序：同一条用例在不同位置执行时，结果、耗时和
+        # 门禁计数都应分别落盘，不能用集合去重。
+        case_records = cases_store.get_many(case_ids)
+        case_by_id = {case.get("id"): case for case in case_records}
+        cases = [case_by_id[cid] for cid in case_ids if cid in case_by_id]
         if not cases:
             return {"error": "套件内没有用例"}
 

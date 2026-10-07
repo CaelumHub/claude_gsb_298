@@ -107,13 +107,25 @@ def seed_demo_data(registry, env_mgr, notify_mgr) -> dict:
         "id": new_id("suite"),
         "project_id": pid,
         "name": "冒烟测试套件",
-        "description": "核心链路冒烟",
+        "description": "核心链路冒烟；健康检查在首尾各执行一次，覆盖同一用例多个引用点",
         "group": "smoke",
         "env_id": env["id"],
-        "case_ids": [c1, c2, c3, c4, c5, c6, c7, c8],
+        "case_ids": [c1, c2, c3, c4, c5, c6, c7, c8, c1],
         "created_at": time.time(),
     }
     registry.store("suites").insert(suite)
+
+    regression_suite = {
+        "id": new_id("suite"),
+        "project_id": pid,
+        "name": "预发回归套件",
+        "description": "在 staging 环境复用核心用例，验证跨环境影响",
+        "group": "regression",
+        "env_id": env2["id"],
+        "case_ids": [c1, c2, c7, c8],
+        "created_at": time.time(),
+    }
+    registry.store("suites").insert(regression_suite)
 
     registry.store("schedules").insert({
         "id": new_id("sch"),
@@ -124,6 +136,51 @@ def seed_demo_data(registry, env_mgr, notify_mgr) -> dict:
         "env_id": env["id"],
         "enabled": False,
         "last_fired_minute": None,
+        "created_at": time.time(),
+    })
+    registry.store("schedules").insert({
+        "id": new_id("sch"),
+        "project_id": pid,
+        "name": "每天凌晨预发回归",
+        "cron": "0 3 * * *",
+        "suite_id": regression_suite["id"],
+        "env_id": env2["id"],
+        "enabled": True,
+        "last_fired_minute": None,
+        "created_at": time.time(),
+    })
+
+    registry.store("release_gates").insert({
+        "id": new_id("gate"),
+        "project_id": pid,
+        "name": "dev 发布门禁",
+        "description": "冒烟通过率、覆盖率与 P0 用例共同决定发布结论",
+        "suite_ids": [suite["id"]],
+        "env_ids": [env["id"]],
+        "rules": {"min_pass_rate": 80, "min_coverage": 60, "require_all_p0": True},
+        "enabled": True,
+        "created_at": time.time(),
+    })
+    registry.store("release_gates").insert({
+        "id": new_id("gate"),
+        "project_id": pid,
+        "name": "staging 准入门禁",
+        "description": "预发回归通过后才允许进入发布候选",
+        "suite_ids": [regression_suite["id"]],
+        "env_ids": [env2["id"]],
+        "rules": {"min_pass_rate": 90, "min_coverage": 70, "require_all_p0": True},
+        "enabled": True,
+        "created_at": time.time(),
+    })
+    registry.store("test_plans").insert({
+        "id": new_id("plan"),
+        "project_id": pid,
+        "name": "2.31 发布测试计划",
+        "description": "跟踪 dev 冒烟与 staging 回归的整体进度",
+        "suite_ids": [suite["id"], regression_suite["id"]],
+        "env_ids": [env["id"], env2["id"]],
+        "status": "in_progress",
+        "enabled": True,
         "created_at": time.time(),
     })
 

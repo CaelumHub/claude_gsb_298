@@ -51,6 +51,7 @@
       <section class="card">
         <div class="row spread"><h2 style="margin:0" id="editor-title">用例编辑</h2>
           <div class="row">
+            <button class="btn secondary small" id="btn-impact" disabled>影响分析</button>
             <button class="btn secondary small" id="btn-run">试跑</button>
             <button class="btn small" id="btn-save">保存</button>
             <button class="btn danger small" id="btn-delete" style="display:none">删除</button>
@@ -153,6 +154,7 @@ function resetEditor() {
   $("#c-tags").value = ""; $("#c-enabled").checked = true;
   $("#editor-title").textContent = "新建用例";
   $("#btn-delete").style.display = "none";
+  $("#btn-impact").disabled = true;
   renderSteps();
 }
 
@@ -165,6 +167,7 @@ async function loadCase(id) {
   $("#c-tags").value = (c.tags || []).join(", "); $("#c-enabled").checked = c.enabled !== false;
   $("#editor-title").textContent = "编辑用例";
   $("#btn-delete").style.display = "inline-flex";
+  $("#btn-impact").disabled = false;
   steps = (c.steps || []).map(s => ({ ...s }));
   renderSteps();
   $$(".case-item").forEach(el => el.classList.remove("active"));
@@ -290,13 +293,19 @@ function readEditor() {
 
 $("#btn-new").onclick = () => { resetEditor(); };
 
+$("#btn-impact").onclick = () => {
+  if (!currentId || !projectId) return;
+  sessionStorage.setItem("impactPatch", JSON.stringify(readEditor()));
+  location.href = `/page/impact.html?project_id=${encodeURIComponent(projectId)}&target_id=${encodeURIComponent(currentId)}`;
+};
+
 $("#btn-save").onclick = async () => {
   const body = readEditor();
   if (!body.name) return toast("请输入用例名称", "error");
   if (!projectId) return toast("请先选择项目", "error");
   if (currentId) {
-    await api(`/api/cases/${currentId}`, { method: "PUT", body });
-    toast("已保存");
+    const result = await api(`/api/cases/${currentId}?impact=1`, { method: "PUT", body });
+    toast(`已保存，影响 ${(result.impact?.impacted||{}).suite_reference_count || 0} 个套件引用点`);
   } else {
     await api(`/api/projects/${projectId}/cases`, { method: "POST", body });
     toast("已创建");

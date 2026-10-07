@@ -57,6 +57,10 @@ def _notify():
     return current_app.config["NOTIFY"]
 
 
+def _impact():
+    return current_app.config["IMPACT"]
+
+
 def _payload() -> dict:
     return request.get_json(silent=True) or {}
 
@@ -224,7 +228,11 @@ def update_case(case_id: str):
     for k in ("name", "description", "priority", "tags", "timeout", "enabled", "steps"):
         if k in data:
             patch[k] = data[k]
+    candidate = dict(case)
+    candidate.update(patch)
     updated = _store("cases").update(case_id, patch)
+    if request.args.get("impact") == "1":
+        return jsonify({"case": updated, "impact": _impact().analyze("case", candidate, baseline=case)})
     return jsonify(updated)
 
 
@@ -245,6 +253,27 @@ def run_single_case(case_id: str):
     result = TestExecutor().execute_case(case, env_config,
                                          timeout=case.get("timeout", 60))
     return jsonify(result)
+
+
+@api.post("/cases/<case_id>/impact")
+def analyze_case_impact(case_id: str):
+    """分析一次尚未保存或已保存的用例变更影响。"""
+    case = _store("cases").get(case_id)
+    if case is None:
+        return _err("用例不存在", 404)
+    data = _payload()
+    patch = data.get("patch")
+    if patch is None:
+        patch = {k: data[k] for k in (
+            "name", "description", "priority", "tags", "timeout", "enabled", "steps"
+        ) if k in data}
+    candidate = dict(case)
+    candidate.update(patch or {})
+    try:
+        analysis = _impact().analyze("case", candidate, baseline=case)
+    except ValueError as exc:
+        return _err(str(exc))
+    return jsonify(analysis)
 
 
 # ---------------------------------------------------------------------------
@@ -551,7 +580,13 @@ def update_environment(env_id: str):
     patch = {k: data[k] for k in ("name", "description", "python_version",
                                   "base_image", "variables", "dependencies", "config")
              if k in data}
-    return jsonify(_env_mgr().update(env_id, patch))
+    candidate = dict(env)
+    candidate.update(patch)
+    updated = _env_mgr().update(env_id, patch)
+    if request.args.get("impact") == "1":
+        return jsonify({"environment": updated,
+                        "impact": _impact().analyze("environment", candidate, baseline=env)})
+    return jsonify(updated)
 
 
 @api.delete("/environments/<env_id>")
@@ -563,6 +598,27 @@ def delete_environment(env_id: str):
 @api.get("/environments/<env_id>/resolve")
 def resolve_environment(env_id: str):
     return jsonify(_env_mgr().resolve(env_id))
+
+
+@api.post("/environments/<env_id>/impact")
+def analyze_environment_impact(env_id: str):
+    """分析一次尚未保存或已保存的环境变更影响。"""
+    env = _env_mgr().get(env_id)
+    if env is None:
+        return _err("环境不存在", 404)
+    data = _payload()
+    patch = data.get("patch")
+    if patch is None:
+        patch = {k: data[k] for k in ("name", "description", "python_version",
+                                      "base_image", "variables", "dependencies", "config")
+                 if k in data}
+    candidate = dict(env)
+    candidate.update(patch or {})
+    try:
+        analysis = _impact().analyze("environment", candidate, baseline=env)
+    except ValueError as exc:
+        return _err(str(exc))
+    return jsonify(analysis)
 
 
 # ---------------------------------------------------------------------------

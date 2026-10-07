@@ -60,6 +60,7 @@
         </div>
         <div class="row mt">
           <button class="btn" id="btn-save">保存</button>
+          <button class="btn secondary" id="btn-impact" disabled>影响分析</button>
           <button class="btn secondary" id="btn-cancel">取消</button>
         </div>
       </section>
@@ -102,6 +103,7 @@ async function loadEnvs() {
           <span class="muted mono" style="font-size:12px">${esc(e.python_version)} · ${esc(e.base_image)}</span></div>
         <div class="row">
           <button class="btn small secondary" onclick="resolve('${e.id}')">解析依赖</button>
+          <button class="btn small secondary" onclick="impactEnv('${e.id}')">影响分析</button>
           <button class="btn small secondary" onclick="editEnv('${e.id}')">编辑</button>
           <button class="btn small danger" onclick="delEnv('${e.id}')">删除</button>
         </div>
@@ -133,6 +135,7 @@ function newEnv() {
   $("#e-latency").value = "20"; $("#e-fail").value = "0.0";
   $("#e-vars").value = '{"REGION":"dev"}';
   deps = []; renderDeps();
+  $("#btn-impact").disabled = true;
 }
 
 function editEnv(id) {
@@ -147,6 +150,7 @@ function editEnv(id) {
   $("#e-fail").value = (e.config||{}).fail_rate ?? 0;
   $("#e-vars").value = JSON.stringify(e.variables || {}, null, 1);
   deps = (e.dependencies || []).map(d => ({ ...d })); renderDeps();
+  $("#btn-impact").disabled = false;
 }
 
 async function delEnv(id) {
@@ -154,6 +158,33 @@ async function delEnv(id) {
   await api(`/api/environments/${id}`, { method: "DELETE" });
   toast("已删除");
   loadEnvs();
+}
+
+function editorPatch() {
+  let vars = {};
+  try { vars = JSON.parse($("#e-vars").value || "{}"); }
+  catch (_) { return { error: "环境变量不是合法 JSON" }; }
+  return {
+    name: $("#e-name").value.trim(),
+    description: $("#e-desc").value,
+    python_version: $("#e-py").value,
+    base_image: $("#e-image").value,
+    variables: vars,
+    dependencies: deps.filter(d => d.name.trim()).map(d => ({ name: d.name.trim(), constraint: d.constraint || "*" })),
+    config: {
+      base_url: $("#e-url").value,
+      latency_ms: parseInt($("#e-latency").value || "0", 10),
+      fail_rate: parseFloat($("#e-fail").value || "0"),
+    },
+  };
+}
+
+function impactEnv(id) {
+  if (!projectId) return;
+  const patch = id === editingId ? editorPatch() : {};
+  if (patch.error) return toast(patch.error, "error");
+  sessionStorage.setItem("impactPatch", JSON.stringify(patch));
+  location.href = `/page/impact.html?project_id=${encodeURIComponent(projectId)}&type=environment&target_id=${encodeURIComponent(id)}`;
 }
 
 async function resolve(id) {
@@ -171,6 +202,7 @@ async function resolve(id) {
 
 $("#btn-new").onclick = newEnv;
 $("#btn-cancel").onclick = () => { editingId = null; };
+$("#btn-impact").onclick = () => editingId && impactEnv(editingId);
 
 $("#btn-save").onclick = async () => {
   const name = $("#e-name").value.trim();
@@ -186,8 +218,8 @@ $("#btn-save").onclick = async () => {
       fail_rate: parseFloat($("#e-fail").value||"0") },
   };
   if (editingId) {
-    await api(`/api/environments/${editingId}`, { method: "PUT", body });
-    toast("已保存");
+    const result = await api(`/api/environments/${editingId}?impact=1`, { method: "PUT", body });
+    toast(`已保存，影响 ${(result.impact?.impacted||{}).schedule_count || 0} 个启用计划`);
   } else {
     await api(`/api/projects/${projectId}/environments`, { method: "POST", body });
     toast("已创建");
